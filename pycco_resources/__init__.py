@@ -189,6 +189,17 @@ body .vc { color: #19469D }                     /* Name.Variable.Class */
 body .vg { color: #19469D }                     /* Name.Variable.Global */
 body .vi { color: #19469D }                     /* Name.Variable.Instance */
 body .il { color: #666666 }                     /* Literal.Number.Integer.Long */
+
+/*----------------------- Table Formatting ------------------------------*/
+table {
+    border-collapse: collapse;
+}
+th  {
+    background-color: #FAEBD7;
+}
+table, td, th {
+    border: 1px solid black;
+}
 """
 
 html = """\
