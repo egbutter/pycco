@@ -31,6 +31,7 @@ Or, to install the latest source
     python setup.py install
 """
 
+
 # === Main Documentation Generation Functions ===
 
 def generate_documentation(source, outdir=None, preserve_paths=True,
@@ -63,19 +64,22 @@ def parse(source, code, language):
         }
     """
 
-    lines = code.split("\n")
-    sections = []
-    has_code = docs_text = code_text = ""
+    DOC_TOKENS = (
+        Token.Literal.String.Doc,
+        Token.Comment,
+        Token.Comment.Multiline,
+        Token.Comment.Single,
+        Token.Comment.Special,
+        )
 
-    if lines[0].startswith("#!"):
-        lines.pop(0)
-
-    if language["name"] == "python":
-        for linenum, line in enumerate(lines[:2]):
-            if re.search(r'coding[:=]\s*([-\w.]+)', lines[linenum]):
-                lines.pop(linenum)
-                break
-
+    # stripping comment indicators out of docs
+    def clean(this):
+        this = this.lstrip(language['symbol'])
+        for _m in language['multistart']:
+            this = this.lstrip(_m)
+        for _m in language['multiend']:
+            this = this.rstrip(_m)
+        return this.strip()
 
     def save(docs, code):
         if docs or code:
@@ -84,60 +88,64 @@ def parse(source, code, language):
                 "code_text": code
             })
 
-    # Setup the variables to get ready to check for multiline comments
-    multi_line = False
-    multi_line_delimiters = [language.get("multistart"), language.get("multiend")]
+    lines = code.split("\n")
+    sections = []
+    this_indent = docs_text = code_text = ""
 
-    for line in lines:
+    # remove shebangs
+    if lines[0].startswith("#!"):
+        lines.pop(0)
 
-        # Only go into multiline comments section when one of the delimiters is
-        # found to be at the start of a line
-        if all(multi_line_delimiters) and any([line.lstrip().startswith(delim) or line.rstrip().endswith(delim) for delim in multi_line_delimiters]):
-            if not multi_line:
-                multi_line = True
+    # remove python source encoding
+    if language["name"] == "python":
+        for linenum, line in enumerate(lines[:2]):
+            if re.search(r'coding[:=]\s*([-\w.]+)', lines[linenum]):
+                lines.pop(linenum)
+                break
 
-            else:
-                multi_line = False
+    tokenized = pygments.lex("\n".join(lines), language["lexer"])
 
-            if (multi_line
-               and line.strip().endswith(language.get("multiend"))
-               and len(line.strip()) > len(language.get("multiend"))):
-                multi_line = False
-
-            # Get rid of the delimiters so that they aren't in the final docs
-            line = line.replace(language["multistart"], '')
-            line = line.replace(language["multiend"], '')
-            docs_text += line.strip() + '\n'
-            indent_level = re.match("\s*", line).group(0)
-
-            if has_code and docs_text.strip():
-                save(docs_text, code_text[:-1])
-                code_text = code_text.split('\n')[-1]
-                has_code = docs_text = ''
-
-        elif multi_line:
-            # Remove leading spaces
-            if re.match(r' {%d}' % len(indent_level), line):
-                docs_text += line[len(indent_level):] + '\n'
-            else:
-                docs_text += line + '\n'
-
-        elif re.match(language["comment_matcher"], line):
-            if has_code:
-                save(docs_text, code_text)
-                has_code = docs_text = code_text = ''
-            docs_text += re.sub(language["comment_matcher"], "", line) + "\n"
-
-        else:
-            if code_text and any([line.lstrip().startswith(x) for x in ['class ', 'def ', '@']]):
-                if not code_text.lstrip().startswith("@"):
+    for tok, this in tokenized:
+        if this=='\n':
+            this_indent = ""
+        elif not this.strip():
+            this_indent += this
+        if tok in DOC_TOKENS:
+            # remove formatting from our comments
+            this_doc = clean(this)
+            # flush doc relative to code indent
+            if this_indent:
+                this_doc = this_doc.replace('\n'+this_indent, '\n')
+            if language['name'] =='python':
+                # reformat doctests as codeblock, else they get treated like quotes
+                parts = []
+                for part in doctest.DocTestParser().parse(this_doc):
+                    if isinstance(part, doctest.Example):
+                        part = "`{}`\n\n**{}**\n\n".format(part.source.strip(), part.want.strip())
+                    parts.append(part)
+                this_doc = ''.join(parts)
+                # if python class of def, attach docstring to previous line
+                prev_line = ''
+                lines = code_text.split('\n')
+                _ixs = [i for i,w in enumerate(lines) if w.strip()]
+                if _ixs:
+                    ix = max(_ixs)
+                    prev_line = lines[ix]
+                if prev_line and any([word in prev_line for word in ('class ', 'def ',)]):
+                    save(docs_text, '\n'.join(lines[:ix]))
+                    save(this_doc, prev_line)
+                    this_doc = ''  # reset since we saved this doc to previous code
+                else:
                     save(docs_text, code_text)
-                    code_text = has_code = docs_text = ''
+            else:
+                save(docs_text, code_text)
+            # reset code for new section, start it off with this doc
+            code_text = ''
+            docs_text = this_doc
+        else:
+            code_text += this
 
-            has_code = True
-            code_text += line + '\n'
-
-
+    # flush whatever we have left
     save(docs_text, code_text)
 
     return sections
@@ -268,47 +276,54 @@ import pystache
 import re
 import sys
 import time
+import doctest
 from markdown import markdown
 from os import path
 from pygments import lexers, formatters
+from pygments.token import Token
 
 # A list of the languages that Pycco supports, mapping the file extension to
 # the name of the Pygments lexer and the symbol that indicates a comment. To
 # add another language to Pycco's repertoire, add it here.
 languages = {
     ".coffee": { "name": "coffee-script", "symbol": "#",
-        "multistart": '###', "multiend": '###' },
+        "multistart": ['###'], "multiend": ['###'], },
 
-    ".pl":  { "name": "perl", "symbol": "#" },
+    ".pl":  { "name": "perl", "symbol": "#",
+        "multistart": [], "multiend": [], },
 
-    ".sql": { "name": "sql", "symbol": "--" },
+    ".sql": { "name": "sql", "symbol": "--",
+        "multistart": [], "multiend": [], },
 
     ".c":   { "name": "c", "symbol": "//",
-        "multistart": "/*", "multiend": "*/"},
+        "multistart": ["/*"], "multiend": ["*/"], },
 
-    ".cpp": { "name": "cpp", "symbol": "//"},
+    ".cpp": { "name": "cpp", "symbol": "//",
+        "multistart": ["/*"], "multiend": ["*/"], },
 
     ".js": { "name": "javascript", "symbol": "//",
-        "multistart": "/*", "multiend": "*/"},
+        "multistart": ["/*"], "multiend": ["*/"], },
 
     ".rb": { "name": "ruby", "symbol": "#",
-        "multistart": "=begin", "multiend": "=end"},
+        "multistart": ["=begin"], "multiend": ["=end"], },
 
     ".py": { "name": "python", "symbol": "#",
-        "multistart": '"""', "multiend": '"""' },
+        "multistart": ['"""', "'''"], "multiend": ['"""', "'''"], },
 
     ".scm": { "name": "scheme", "symbol": ";;",
-        "multistart": "#|", "multiend": "|#"},
+        "multistart": ["#|"], "multiend": ["|#"], },
 
     ".lua": { "name": "lua", "symbol": "--",
-        "multistart": "--[[", "multiend": "--]]"},
+        "multistart": ["--[["], "multiend": ["--]]"], },
 
-    ".erl": { "name": "erlang", "symbol": "%%" },
+    ".erl": { "name": "erlang", "symbol": "%%",
+        "multistart": [], "multiend": [], },
 
-    ".tcl":  { "name": "tcl", "symbol": "#" },
+    ".tcl":  { "name": "tcl", "symbol": "#",
+        "multistart": [], "multiend": [], },
 
     ".hs": { "name": "haskell", "symbol": "--",
-        "multistart": "{-", "multiend": "-}"},
+        "multistart": ["{-"], "multiend": ["-}"], },
 }
 
 # Build out the appropriate matchers and delimiters for each language.
